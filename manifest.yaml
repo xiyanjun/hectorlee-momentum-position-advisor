@@ -1,0 +1,28 @@
+name: hectorlee-momentum-position-advisor
+version: 1.2.0
+description: "动量持仓顾问 V1.2。纯量价动量评估，判断持仓该继续持有、减仓还是卖出。12种形态（6持有+5预警+4卖出）+ Pre-M11预破位预警，100分制五维评分+成本因子。支持持仓文件批量诊断、单股命令行诊断（可带成本价）、全市场动量扫描。"
+category: finance
+author: hectorlee
+tags:
+  - 持仓管理
+  - 动量分析
+  - A股
+  - 技术分析
+  - 持仓诊断
+  - 趋势跟踪
+  - 风险预警
+triggers:
+  - 持仓诊断
+  - 动量评估
+  - 持有还是卖出
+  - 减仓
+  - 破位预警
+  - 趋势跟踪
+  - 持仓顾问
+dependencies:
+  python:
+    - requests
+    - numpy
+mcp_requirements:
+  - 通达信(tdx-connector): K线数据、板块共振数据
+min_python: "3.9"
