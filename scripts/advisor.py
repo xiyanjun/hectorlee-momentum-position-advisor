@@ -217,11 +217,17 @@ def diagnose_portfolio(detail: bool = False, filepath: str = None):
     
     # 汇总
     hold = [r for r in results if r['score']['decision'] in ('hold', 'hold_buy')]
-    reduce_list = [r for r in results if r['score']['decision'] == 'reduce']
+    reduce_list = [r for r in results if r['score']['decision'] in ('reduce', 'reduce_watch')]
+    watch_list = [r for r in results if r['score']['decision'] == 'watch']
     sell_list = [r for r in results if r['score']['decision'] == 'sell']
     
     print(f"{_c('--- Summary ---', Color.BOLD)}")
-    print(f"  HOLD: {len(hold)}  REDUCE: {len(reduce_list)}  SELL: {len(sell_list)}")
+    parts = []
+    if hold: parts.append(f"HOLD: {len(hold)}")
+    if reduce_list: parts.append(f"REDUCE: {len(reduce_list)}")
+    if watch_list: parts.append(f"WATCH: {len(watch_list)}")
+    if sell_list: parts.append(f"SELL: {len(sell_list)}")
+    print(f"  {'  '.join(parts)}")
     
     # 板块共振检测
     if len(results) >= 2:

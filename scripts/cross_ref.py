@@ -143,7 +143,7 @@ def compute_fusion_bonus(vp_result: Optional[dict], momentum_decision: str) -> T
         else:
             return 3, f"量价关注: {label} {score}分（弱蓄力信号，略加分）"
     
-    elif momentum_decision == 'reduce':
+    elif momentum_decision in ('reduce', 'reduce_watch'):
         if score >= 60:
             return 5, f"量价收敛: {label} {score}分（回调蓄力中，减仓不必过急）"
         else:

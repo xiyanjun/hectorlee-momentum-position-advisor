@@ -54,7 +54,7 @@ def score_trend_strength(kline: List[dict], params: dict = None, detect_result: 
         score += 5
         details.append(f'站上MA60({ma60[-1]:.2f})(+5)')
     else:
-        # 检测M1康复场景
+        # M1康复场景：轻罚
         m1_hold = False
         if detect_result:
             hold = detect_result.get('hold_patterns', [])
@@ -63,6 +63,11 @@ def score_trend_strength(kline: List[dict], params: dict = None, detect_result: 
         if m1_hold and closes[-1] > ma20[-1]:
             score -= 5
             details.append(f'M1康复中跌破MA60({ma60[-1]:.2f})轻罚(-5)')
+        elif closes[-1] > ma10[-1] and closes[-1] > ma20[-1]:
+            # V1.3.2: 站上MA10+MA20双支撑时，跌破MA60仅减半罚
+            # 短期趋势完好，MA60在上方属正常整理/横盘状态
+            score -= 10
+            details.append(f'跌破MA60({ma60[-1]:.2f})但MA10/20双支撑(-10)')
         else:
             score -= 15
             details.append(f'跌破MA60({ma60[-1]:.2f})(-15)')
@@ -275,7 +280,7 @@ def score_ma_support(kline: List[dict], params: dict = None, detect_result: dict
     return {'score': score, 'max': max_score, 'label': '均线支撑', 'details': details}
 
 
-def score_pattern_match(detect_result: dict, params: dict = None) -> dict:
+def score_pattern_match(detect_result: dict, params: dict = None, kline: list = None, vp_result: dict = None) -> dict:
     """形态匹配 15分"""
     max_score = 15
     score = 0
@@ -289,18 +294,43 @@ def score_pattern_match(detect_result: dict, params: dict = None) -> dict:
         details.append(f'卖出信号触发 → 0分')
         return {'score': score, 'max': max_score, 'label': '形态匹配', 'details': details}
     
-    if not hold:
-        score = 0
-        details.append('无持有形态命中 → 0分')
+    if hold:
+        # 取最强的持有形态
+        best = max(hold, key=lambda h: h.get('score_base', 0))
+        base = best.get('score_base', 8)
+        score = min(max_score, max(8, base - 2))
+        details.append(f'{best["name"]}({best["tag"]}) 基础分{base} → 匹配{score}/{max_score}')
         return {'score': score, 'max': max_score, 'label': '形态匹配', 'details': details}
     
-    # 取最强的持有形态
-    best = max(hold, key=lambda h: h.get('score_base', 0))
-    base = best.get('score_base', 8)
-    # 映射到15分制：基础分8~17 → 8~15
-    score = min(max_score, max(8, base - 2))
-    details.append(f'{best["name"]}({best["tag"]}) 基础分{base} → 匹配{score}/{max_score}')
+    # V1.3.2: 无M1-M6命中时，检测 M0 横盘整理通用形态
+    # 条件：站上MA10+MA20 + VP横盘确认
+    if kline and vp_result:
+        closes = [k['close'] for k in kline]
+        n = len(kline)
+        
+        def sma(arr, w):
+            r = []
+            for i in range(len(arr)):
+                if i < w-1:
+                    r.append(sum(arr[:i+1])/(i+1))
+                else:
+                    r.append(sum(arr[i-w+1:i+1])/w)
+            return r
+        
+        ma10 = sma(closes, 10)
+        ma20 = sma(closes, 20)
+        above_ma10 = closes[-1] > ma10[-1]
+        above_ma20 = closes[-1] > ma20[-1]
+        vp_hit = vp_result.get('hit', False)
+        vp_confirmed = vp_hit and not vp_result.get('warning')
+        
+        if above_ma10 and above_ma20 and vp_confirmed:
+            score = 8
+            details.append(f'M0横盘整理 🪜 站上MA10({ma10[-1]:.2f})/MA20({ma20[-1]:.2f})+VP确认 → 匹配{score}/{max_score}')
+            return {'score': score, 'max': max_score, 'label': '形态匹配', 'details': details}
     
+    score = 0
+    details.append('无持有形态命中 → 0分')
     return {'score': score, 'max': max_score, 'label': '形态匹配', 'details': details}
 
 
@@ -453,7 +483,7 @@ def calculate_score(kline: List[dict], detect_result: dict,
         score_volume_health(kline, p),
         score_exhaustion(kline, p, detect_result),
         score_ma_support(kline, p, detect_result),
-        score_pattern_match(detect_result, p),
+        score_pattern_match(detect_result, p, kline, vp_result),
     ]
     
     base_total = sum(d['score'] for d in dims)
@@ -468,36 +498,108 @@ def calculate_score(kline: List[dict], detect_result: dict,
     total = base_total + vp_bonus + buy_dim['score'] + cost_dim['score']
     total = max(0, min(100, total))
     
-    # 决策映射（基于总分）
-    # M1康复场景放宽：M1活跃+衰竭信号满分 → 允许更低分持有
-    hold_threshold = 75
-    if detect_result:
-        hold = detect_result.get('hold_patterns', [])
-        has_m1 = any('M1' in h.get('name', '') or '底部启动' in h.get('name', '') for h in hold)
-        exhaust_dim = [d for d in dims if d['label'] == '衰竭信号']
-        exhaust_healthy = exhaust_dim and exhaust_dim[0]['score'] >= 23
-        if has_m1 and exhaust_healthy:
-            hold_threshold = 65  # M1底部康复场景放宽持有阈值
-    
-    if total >= hold_threshold:
-        decision = 'hold'
-    elif total >= 50:
-        decision = 'reduce'
-        # 加仓信号升级：动量≥60 + 加仓≥⭐⭐ → 升级为持有
-        buy_grade = buy_dim.get('buy_grade', 0)
-        if base_total >= 60 and buy_grade >= 2:
-            decision = 'hold_buy'  # 持有（加仓信号驱动）
-    else:
-        decision = 'sell'
-    
-    # 量价共振维度
+    # 量价共振维度（先构建，用于质量置信度计算）
     vp_dim = {
-        'score': max(0, vp_bonus + 5),  # 展示用，偏移到0-10
+        'score': max(0, vp_bonus + 5),
         'max': 10,
         'label': '量价共振',
         'details': [vp_reason] if vp_reason else ['无共振信号'],
         'raw_bonus': vp_bonus,
     }
+    
+    # === V1.3.2: 质量置信度 + MA结构检测 ===
+    all_dims = dims + [vp_dim]
+    healthy_count = sum(1 for d in all_dims if d['max'] > 0 and d['score'] >= d['max'] * 0.6)
+    
+    # MA多头结构检测（均线排列健康，即使价格暂时跌破）
+    def _sma(arr, w):
+        r = []
+        for i in range(len(arr)):
+            if i < w-1: r.append(sum(arr[:i+1])/(i+1))
+            else: r.append(sum(arr[i-w+1:i+1])/w)
+        return r
+    closes_kl = [k['close'] for k in kline]
+    ma10_arr = _sma(closes_kl, 10)
+    ma20_arr = _sma(closes_kl, 20)
+    ma60_arr = _sma(closes_kl, 60)
+    
+    ma_bullish = (ma10_arr[-1] > ma20_arr[-1] > ma60_arr[-1])  # MA多头排列
+    ma_broken = closes_kl[-1] < ma20_arr[-1]                     # 价格跌破MA20
+    ma_healthy_pullback = ma_bullish and ma_broken               # 均线多头但价格回调
+    
+    # 信号提取
+    detect_result = detect_result or {}
+    hold = detect_result.get('hold_patterns', [])
+    has_m1 = any('M1' in h.get('name', '') or '底部启动' in h.get('name', '') for h in hold)
+    exhaust_dim = [d for d in dims if d['label'] == '衰竭信号']
+    exhaust_healthy = exhaust_dim and exhaust_dim[0]['score'] >= 23
+    rebound = detect_result.get('rebound_signals', [])
+    has_rebound = bool(rebound)
+    
+    # === 决策引擎 V1.3.2 重构 ===
+    if total >= 75:
+        decision = 'hold'
+        quality_note = f'HOLD 标准持有 {healthy_count}/{len(all_dims)}维健康'
+        
+    elif total >= 65:
+        # M1 康复场景：放宽至 65
+        if has_m1 and exhaust_healthy:
+            decision = 'hold'
+            quality_note = f'HOLD M1康复 {healthy_count}/{len(all_dims)}维健康'
+        # 质量升级：4维+健康 → HOLD（但 MA 多头回调降为 REDUCE）
+        elif healthy_count >= 4:
+            if ma_healthy_pullback:
+                decision = 'reduce'
+                quality_note = f'REDUCE MA多头回调 {healthy_count}/{len(all_dims)}维健康'
+            else:
+                decision = 'hold'
+                quality_note = f'HOLD 质量升级 {healthy_count}/{len(all_dims)}维健康'
+        else:
+            decision = 'reduce'
+            quality_note = f'REDUCE 偏谨慎 {healthy_count}/{len(all_dims)}维健康'
+        
+    elif total >= 50:
+        # 反弹信号或 M1 活跃 → WATCH
+        if has_rebound:
+            decision = 'watch'
+            quality_note = f'WATCH 反弹博弈 {healthy_count}/{len(all_dims)}维健康'
+        elif has_m1:
+            decision = 'watch'
+            quality_note = f'WATCH M1康复观察 {healthy_count}/{len(all_dims)}维健康'
+        elif healthy_count >= 4:
+            decision = 'reduce'
+            quality_note = f'REDUCE 偏持有观望 {healthy_count}/{len(all_dims)}维健康'
+        else:
+            decision = 'reduce'
+            quality_note = f'REDUCE 偏谨慎 {healthy_count}/{len(all_dims)}维健康'
+        
+    elif total >= 35:
+        # 反弹信号 → WATCH
+        if has_rebound:
+            decision = 'watch'
+            quality_note = f'WATCH 超跌反弹 {healthy_count}/{len(all_dims)}维健康'
+        # 均线多头结构 → 涨多回调，不卖出
+        elif ma_bullish:
+            decision = 'reduce'
+            quality_note = f'REDUCE 均线多头回调 {healthy_count}/{len(all_dims)}维健康'
+        else:
+            decision = 'sell'
+            quality_note = f'SELL 弱势破位 {healthy_count}/{len(all_dims)}维健康'
+    
+    else:
+        # <35 深度破位，但反弹信号可降级为 WATCH
+        if has_rebound:
+            decision = 'watch'
+            quality_note = f'WATCH 超跌反弹 {healthy_count}/{len(all_dims)}维健康'
+        else:
+            decision = 'sell'
+            quality_note = f'SELL 深度破位 {healthy_count}/{len(all_dims)}维健康'
+    
+    # 加仓信号覆盖：≥60分基础 + 加仓≥2星 → 升级持有
+    buy_grade = buy_dim.get('buy_grade', 0)
+    if base_total >= 60 and buy_grade >= 2 and decision in ('reduce', 'watch'):
+        decision = 'hold_buy'
+        quality_note += ' → 加仓升级HOLD'
     
     return {
         'total': total,
@@ -510,6 +612,8 @@ def calculate_score(kline: List[dict], detect_result: dict,
         'vp_reason': vp_reason,
         'buy_advice': buy_dim.get('buy_advice'),
         'buy_grade': buy_dim.get('buy_grade', 0),
+        'quality_note': quality_note,
+        'healthy_count': healthy_count,
     }
 
 
@@ -601,7 +705,7 @@ def format_score_output(score_result: dict, detect_result: dict,
     lines.append("")
     
     # 形态命中
-    decision_tag = {'hold': 'HOLD', 'hold_buy': 'HOLD +BUY', 'reduce': 'REDUCE', 'sell': 'SELL'}
+    decision_tag = {'hold': 'HOLD', 'hold_buy': 'HOLD +BUY', 'reduce_watch': 'REDUCE+', 'reduce': 'REDUCE', 'watch': 'WATCH', 'sell': 'SELL'}
     primary = detect_result.get('primary', {})
     
     base = score_result.get('base_total', score_result['total'])
@@ -669,22 +773,8 @@ def format_score_output(score_result: dict, detect_result: dict,
         lines.append("")
     
     # 决策建议
-    if score_result['decision'] == 'sell':
-        lines.append("Advice: SELL -- momentum exhaustion confirmed")
-    elif score_result['decision'] == 'reduce':
-        warn_names = ' | '.join(w.get('name', '') for w in warnings)
-        lines.append("Advice: REDUCE -- " + warn_names)
-    elif score_result['decision'] == 'hold_buy':
-        buy_advice = score_result.get('buy_advice', '')
-        stars = '⭐' * score_result.get('buy_grade', 0)
-        lines.append(f"Advice: HOLD -- {stars} {buy_advice} (加仓信号驱动升级)")
-    else:
-        buy_advice = score_result.get('buy_advice')
-        if buy_advice:
-            stars = '⭐' * score_result.get('buy_grade', 0)
-            lines.append(f"Advice: HOLD -- {stars} {buy_advice}")
-        else:
-            lines.append("Advice: HOLD -- " + primary.get('detail', 'momentum healthy'))
+    quality_note = score_result.get('quality_note', '')
+    lines.append(f"Advice: {quality_note}")
     
     lines.append("")
     
@@ -694,7 +784,7 @@ def format_score_output(score_result: dict, detect_result: dict,
 def format_score_compact(score_result: dict, detect_result: dict,
                           name: str, code: str) -> str:
     """简洁单行输出"""
-    decision_icons = {'hold': '[HOLD]', 'hold_buy': '[HOLD+BUY]', 'reduce': '[REDUCE]', 'sell': '[SELL]'}
+    decision_icons = {'hold': '[HOLD]', 'hold_buy': '[HOLD+BUY]', 'reduce_watch': '[REDUCE+]', 'reduce': '[REDUCE]', 'watch': '[WATCH]', 'sell': '[SELL]'}
     icon = decision_icons.get(score_result['decision'], '[?]')
     primary = detect_result.get('primary', {})
     warnings = detect_result.get('warnings', [])

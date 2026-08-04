@@ -1104,7 +1104,7 @@ def detect_r3_oversold_mean_reversion(kline: List[dict], params: dict = None) ->
     
     触发条件：
     1. 20日回撤 > 30%（极端超卖）
-    2. 价格偏离MA20 > 20%（乖离极大，均值回归引力强）
+    2. 价格偏离MA20 > 12%（V1.3.2下调，原20%太苛刻，MA20下行时乖离难以追赶跌幅）
     3. 今日收阳 或 出现十字星
     4. 近3日至少1日收阳（有资金开始试探）
     
@@ -1128,9 +1128,9 @@ def detect_r3_oversold_mean_reversion(kline: List[dict], params: dict = None) ->
     if dd > -30:
         return None
     
-    # 条件2：极端乖离
+    # 条件2：超卖乖离（V1.3.2: -20→-12）
     deviation = (closes[-1] - ma20[-1]) / ma20[-1] * 100
-    if deviation > -20:
+    if deviation > -12:
         return None
     
     # 条件3：今日止跌信号（收阳 或 十字星）
@@ -1146,10 +1146,10 @@ def detect_r3_oversold_mean_reversion(kline: List[dict], params: dict = None) ->
     if recent_bullish == 0:
         return None
     
-    # 质量评分
+    # 质量评分（V1.3.2: 乖离评分基准从-20调整为-12）
     quality = 0
     quality += min(20, int(abs(dd) - 30))
-    quality += min(15, int(abs(deviation) - 20))
+    quality += min(15, int(abs(deviation) - 12))
     quality += 10 if is_bullish else 5
     quality += recent_bullish * 5
     quality = min(100, quality * 2)
