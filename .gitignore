@@ -1,0 +1,23 @@
+# Data files
+data/prev_decisions.json
+data/*.json
+data/*.csv
+data/*.pkl
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temp
+*.tmp
+*.swp
+hectorlee-momentum-position-advisor-backup/

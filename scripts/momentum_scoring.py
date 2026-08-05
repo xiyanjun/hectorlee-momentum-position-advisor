@@ -527,6 +527,22 @@ def calculate_score(kline: List[dict], detect_result: dict,
     ma_broken = closes_kl[-1] < ma20_arr[-1]                     # 价格跌破MA20
     ma_healthy_pullback = ma_bullish and ma_broken               # 均线多头但价格回调
     
+    # V1.3.3: 双支撑弱势整理检测
+    # 股价站上MA10+MA20但跌破MA60 → 短期有支撑，中期未修复，窄幅整理特征
+    price = closes_kl[-1]
+    ma1020_double_support = (price > ma10_arr[-1]) and (price > ma20_arr[-1])
+    ma60_broken = price < ma60_arr[-1]
+    double_support_weak = ma1020_double_support and ma60_broken and not ma_bullish
+
+    # V1.3.4: 深度回撤+阳线检测（底部反弹初期判断）
+    # 回撤>20% + 收阳 → 止跌信号，非趋势延续。底部反弹初期天然缩量，不做量能要求
+    highs_kl = [k['high'] for k in kline]
+    opens_kl = [k['open'] for k in kline]
+    peak20 = max(highs_kl[-20:]) if len(highs_kl) >= 20 else max(highs_kl)
+    drawdown = (price / peak20 - 1) * 100
+    is_bullish_day = (closes_kl[-1] > opens_kl[-1])
+    deep_rebound_watch = (drawdown < -20) and is_bullish_day
+    
     # 信号提取
     detect_result = detect_result or {}
     hold = detect_result.get('hold_patterns', [])
@@ -535,6 +551,8 @@ def calculate_score(kline: List[dict], detect_result: dict,
     exhaust_healthy = exhaust_dim and exhaust_dim[0]['score'] >= 23
     rebound = detect_result.get('rebound_signals', [])
     has_rebound = bool(rebound)
+    sell_signals = detect_result.get('sell_signals', [])
+    has_sell_signal = bool(sell_signals)  # V1.3.3: 是否有明确卖出形态触发
     
     # === 决策引擎 V1.3.2 重构 ===
     if total >= 75:
@@ -582,6 +600,10 @@ def calculate_score(kline: List[dict], detect_result: dict,
         elif ma_bullish:
             decision = 'reduce'
             quality_note = f'REDUCE 均线多头回调 {healthy_count}/{len(all_dims)}维健康'
+        # V1.3.3: MA10/20双支撑+跌破MA60+无明确卖出信号 → 弱势整理，WATCH
+        elif double_support_weak and not has_sell_signal:
+            decision = 'watch'
+            quality_note = f'WATCH 弱势整理 {healthy_count}/{len(all_dims)}维健康'
         else:
             decision = 'sell'
             quality_note = f'SELL 弱势破位 {healthy_count}/{len(all_dims)}维健康'
@@ -591,6 +613,10 @@ def calculate_score(kline: List[dict], detect_result: dict,
         if has_rebound:
             decision = 'watch'
             quality_note = f'WATCH 超跌反弹 {healthy_count}/{len(all_dims)}维健康'
+        # V1.3.4: 深度回撤+阳线 → 反弹初期，升级WATCH
+        elif deep_rebound_watch:
+            decision = 'watch'
+            quality_note = f'WATCH 底部反弹 {healthy_count}/{len(all_dims)}维健康'
         else:
             decision = 'sell'
             quality_note = f'SELL 深度破位 {healthy_count}/{len(all_dims)}维健康'
