@@ -1,6 +1,8 @@
 """
-五维评分引擎 V1.0
+多维评分引擎 V1.3.5
 100分制：趋势强度25 + 量能健康度20 + 衰竭信号25 + 均线支撑15 + 形态匹配15
+         + 加仓信号10 + 量价共振10 + 持仓成本±8 + 资金流向8(可选)
+新增：决策滞回(Hysteresis) + 减仓比例建议(Position Sizing) + 市场自适应
 """
 
 from typing import List, Dict, Optional, Tuple
@@ -298,6 +300,7 @@ def score_pattern_match(detect_result: dict, params: dict = None, kline: list = 
         # 取最强的持有形态
         best = max(hold, key=lambda h: h.get('score_base', 0))
         base = best.get('score_base', 8)
+        # M1~M3/M12~M13: 12~15分; M4~M6: 8~12分; M0: 8分
         score = min(max_score, max(8, base - 2))
         details.append(f'{best["name"]}({best["tag"]}) 基础分{base} → 匹配{score}/{max_score}')
         return {'score': score, 'max': max_score, 'label': '形态匹配', 'details': details}
@@ -450,30 +453,193 @@ def compute_cost_factor(price: float, cost: float) -> dict:
     }
 
 
+def score_fund_flow(fund_flow: dict = None) -> dict:
+    """资金流向维度 0-8分（可选数据源：DPP/westockdata）
+    
+    当 fund_flow 为 None 时返回 0 分（数据不可用，不扣分）
+    
+    fund_flow 格式:
+    {
+        'main_net_inflow_5d': 1.25,    # 近5日主力净流入(亿)，正=流入
+        'main_net_inflow_today': 0.35,  # 今日主力净流入(亿)
+        'retail_net_outflow_5d': -0.8,  # 近5日散户净流出(亿)
+        'big_order_ratio': 0.15,        # 大单比例
+    }
+    """
+    max_score = 8
+    if fund_flow is None:
+        return {'score': 0, 'max': max_score, 'label': '资金流向',
+                'details': ['无资金数据'], 'active': False}
+    
+    score = 0
+    details = []
+    active = True
+    
+    inflow_5d = fund_flow.get('main_net_inflow_5d', 0)
+    inflow_today = fund_flow.get('main_net_inflow_today', 0)
+    big_order = fund_flow.get('big_order_ratio', 0)
+    
+    # 近5日主力持续流入
+    if inflow_5d > 0.5:
+        score += 5
+        details.append(f'近5日主力净流入{inflow_5d:.2f}亿(+5)')
+    elif inflow_5d > 0:
+        score += 3
+        details.append(f'近5日主力小幅净流入{inflow_5d:.2f}亿(+3)')
+    elif inflow_5d < -1.0:
+        score -= 5
+        details.append(f'近5日主力净流出{abs(inflow_5d):.2f}亿(-5)')
+    elif inflow_5d < 0:
+        score -= 2
+        details.append(f'近5日主力小幅净流出{abs(inflow_5d):.2f}亿(-2)')
+    
+    # 今日扭转 vs 5日趋势
+    if inflow_5d < 0 and inflow_today > 0.3:
+        score += 3
+        details.append(f'主力方向扭转：今日净流入{inflow_today:.2f}亿(+3)')
+    elif inflow_5d > 0 and inflow_today < -0.3:
+        score -= 3
+        details.append(f'主力方向逆转：今日净流出{abs(inflow_today):.2f}亿(-3)')
+    
+    # 大单比例
+    if big_order > 0.2:
+        score += 3
+        details.append(f'大单占比{big_order:.0%}偏高(+3)')
+    elif big_order < 0.05 and inflow_5d > 0:
+        details.append(f'大单占比{big_order:.0%}偏低，散户主导')
+    
+    score = max(-8, min(max_score, score))
+    return {'score': score, 'max': max_score, 'label': '资金流向',
+            'details': details, 'active': active}
+
+
+def compute_position_size(decision: str, total: int, base_total: int,
+                          cost_factor: dict = None, sector_downgraded: bool = False,
+                          ma_healthy_pullback: bool = False) -> dict:
+    """减仓比例建议 V1.3.5
+    
+    不影响方向性判断，纯粹基于分数区间+上下文给出定量建议。
+    
+    返回:
+    {
+        'action': 'hold' | 'reduce' | 'sell',
+        'ratio': 0.0 ~ 1.0,     # 建议调整比例（对现有持仓）
+        'label': '持有不动' | '减仓20%' | '清仓' 等,
+        'reason': '...',
+    }
+    """
+    pnl_pct = cost_factor.get('pnl_pct') if cost_factor else None
+    
+    if decision in ('hold', 'hold_buy'):
+        return {'action': 'hold', 'ratio': 0, 'label': '持有不动',
+                'reason': '动量评分健康，无需减仓'}
+    
+    if decision == 'watch':
+        return {'action': 'watch', 'ratio': 0, 'label': '观望不动',
+                'reason': '边界信号，观望等方向确认'}
+    
+    # === REDUCE 场景 ===
+    if decision == 'reduce':
+        if total >= 60:
+            ratio = 0.25  # 减25%
+            label = '减仓25%'
+            reason = '偏持有观望，轻仓试探性减仓'
+        elif total >= 50:
+            ratio = 0.50  # 减50%
+            label = '减仓50%'
+            reason = '偏谨慎，保留半仓等确认'
+        elif total >= 40:
+            ratio = 0.65  # 减65%
+            label = '减仓65%'
+            reason = '弱势整理，大幅度减仓避险'
+        else:
+            ratio = 0.80
+            label = '减仓80%'
+            reason = '深度弱势，接近清仓'
+        
+        # MA多头回调 → 减仓比例下调10%
+        if ma_healthy_pullback:
+            ratio = max(0.1, ratio - 0.10)
+            reason += '；均线多头回调，比例下调10%'
+        
+        # 板块共振 → 减仓比例上浮15%
+        if sector_downgraded:
+            ratio = min(1.0, ratio + 0.15)
+            reason += '；板块共振，比例上浮15%'
+        
+        # 大盈缓冲 → 减仓比例下调
+        if pnl_pct and pnl_pct >= 30:
+            ratio = max(0.05, ratio - 0.15)
+            reason += f'；大盈{pnl_pct:+.1f}%缓冲，比例再降15%'
+        elif pnl_pct and pnl_pct >= 15:
+            ratio = max(0.05, ratio - 0.05)
+            reason += f'；中盈{pnl_pct:+.1f}%，比例微降5%'
+        
+        # 大亏 → 减仓优先级高
+        if pnl_pct and pnl_pct <= -10:
+            ratio = min(1.0, ratio + 0.10)
+            reason += f'；大亏{pnl_pct:+.1f}%，止损优先，比例上浮10%'
+        
+        ratio = round(ratio, 2)
+        label = f'减仓{int(ratio*100)}%'
+        
+        return {'action': 'reduce', 'ratio': ratio, 'label': label, 'reason': reason}
+    
+    # === SELL 场景 ===
+    if decision == 'sell':
+        if total >= 30:
+            ratio = 0.80
+            label = '减仓80%'
+            reason = '破位卖出，留少量观察仓'
+        else:
+            ratio = 1.0
+            label = '清仓'
+            reason = '深度破位，建议清仓'
+        
+        # 大盈 → 可留观察仓
+        if pnl_pct and pnl_pct >= 30 and ratio == 1.0:
+            ratio = 0.90
+            label = '减仓90%'
+            reason += f'；大盈{pnl_pct:+.1f}%，可留观察仓'
+        
+        return {'action': 'sell', 'ratio': ratio, 'label': label, 'reason': reason}
+    
+    return {'action': 'unknown', 'ratio': 0, 'label': '未知', 'reason': ''}
+
+
 def calculate_score(kline: List[dict], detect_result: dict, 
                     vp_bonus: int = 0, vp_reason: str = '',
                     vp_result: dict = None,
                     cost: float = None, latest_price: float = None,
-                    params: dict = None) -> dict:
+                    params: dict = None,
+                    prev_decision: str = None,
+                    fund_flow: dict = None,
+                    market_regime: str = None) -> dict:
     """
-    计算完整的五维评分 + 量价共振加成 + 持仓成本因子
+    计算完整的多维评分 + 量价共振加成 + 持仓成本因子 + 资金流向 + 决策滞回
     
     参数:
-        vp_bonus: 量价收敛共振加成 (-10 ~ +10)
+        vp_bonus: 量价收敛共振加成 (-10 ~ +12)
         vp_reason: 加成理由
         cost: 持仓成本价
         latest_price: 最新价格（用于成本计算）
+        prev_decision: 前日决策（用于滞回防震荡）
+        fund_flow: 资金流向数据（可选）
+        market_regime: 大盘环境 'bull'/'sideways'/'bear'（可选）
     
     返回:
     {
         'total': 82,
-        'base_total': 80,     # 五维基础分
-        'max_total': 100,
-        'decision': 'hold' | 'reduce' | 'sell',
+        'base_total': 80,
+        'max_total': 108,      # 含资金流向8分
+        'decision': 'hold' | 'reduce' | 'sell' | 'watch',
         'dimensions': [...],
-        'vp_dim': {...},       # 量价共振维度
-        'cost_dim': {...},     # 持仓成本维度
+        'vp_dim': {...},
+        'cost_dim': {...},
+        'fund_flow_dim': {...},
         'vp_reason': '...',
+        'position_size': {...},  # V1.3.5 新增
+        'hysteresis_applied': False,  # V1.3.5 新增
     }
     """
     p = params or {}
@@ -495,8 +661,11 @@ def calculate_score(kline: List[dict], detect_result: dict,
     # 持仓成本因子
     cost_dim = compute_cost_factor(latest_price or 0, cost or 0)
     
-    total = base_total + vp_bonus + buy_dim['score'] + cost_dim['score']
-    total = max(0, min(100, total))
+    # 资金流向维度（可选数据源，无数据时自动跳过）
+    fund_flow_dim = score_fund_flow(fund_flow)
+    
+    total = base_total + vp_bonus + buy_dim['score'] + cost_dim['score'] + fund_flow_dim['score']
+    total = max(0, min(108, total))
     
     # 量价共振维度（先构建，用于质量置信度计算）
     vp_dim = {
@@ -508,7 +677,7 @@ def calculate_score(kline: List[dict], detect_result: dict,
     }
     
     # === V1.3.2: 质量置信度 + MA结构检测 ===
-    all_dims = dims + [vp_dim]
+    all_dims = dims + [vp_dim, fund_flow_dim]
     healthy_count = sum(1 for d in all_dims if d['max'] > 0 and d['score'] >= d['max'] * 0.6)
     
     # MA多头结构检测（均线排列健康，即使价格暂时跌破）
@@ -526,7 +695,7 @@ def calculate_score(kline: List[dict], detect_result: dict,
     ma_bullish = (ma10_arr[-1] > ma20_arr[-1] > ma60_arr[-1])  # MA多头排列
     ma_broken = closes_kl[-1] < ma20_arr[-1]                     # 价格跌破MA20
     ma_healthy_pullback = ma_bullish and ma_broken               # 均线多头但价格回调
-    
+
     # V1.3.3: 双支撑弱势整理检测
     # 股价站上MA10+MA20但跌破MA60 → 短期有支撑，中期未修复，窄幅整理特征
     price = closes_kl[-1]
@@ -554,12 +723,30 @@ def calculate_score(kline: List[dict], detect_result: dict,
     sell_signals = detect_result.get('sell_signals', [])
     has_sell_signal = bool(sell_signals)  # V1.3.3: 是否有明确卖出形态触发
     
+    # === V1.3.5: 市场环境自适应阈值调整 ===
+    # 牛市放宽阈值（持股更宽容），熊市收紧阈值（卖出更敏感）
+    regime_shift = 0
+    regime_note = ''
+    if market_regime == 'bull':
+        regime_shift = -5  # 所有阈值降低5分，更容易HOLD
+        regime_note = '牛市环境，阈值-5(宽容持股)'
+    elif market_regime == 'bear':
+        regime_shift = +5  # 所有阈值提高5分，更容易SELL
+        regime_note = '熊市环境，阈值+5(谨慎减仓)'
+    # 'sideways' 或 None → 标准阈值，shift=0
+    
+    # 应用阈值偏移（所有边界减regime_shift）
+    t_high = 75 + regime_shift
+    t_upper = 65 + regime_shift
+    t_mid = 50 + regime_shift
+    t_low = 35 + regime_shift
+    
     # === 决策引擎 V1.3.2 重构 ===
-    if total >= 75:
+    if total >= t_high:
         decision = 'hold'
         quality_note = f'HOLD 标准持有 {healthy_count}/{len(all_dims)}维健康'
         
-    elif total >= 65:
+    elif total >= t_upper:
         # M1 康复场景：放宽至 65
         if has_m1 and exhaust_healthy:
             decision = 'hold'
@@ -576,11 +763,14 @@ def calculate_score(kline: List[dict], detect_result: dict,
             decision = 'reduce'
             quality_note = f'REDUCE 偏谨慎 {healthy_count}/{len(all_dims)}维健康'
         
-    elif total >= 50:
-        # 反弹信号或 M1 活跃 → WATCH
+    elif total >= t_mid:
+        # 反弹信号或 M1 活跃或底部反弹 → WATCH
         if has_rebound:
             decision = 'watch'
             quality_note = f'WATCH 反弹博弈 {healthy_count}/{len(all_dims)}维健康'
+        elif deep_rebound_watch:
+            decision = 'watch'
+            quality_note = f'WATCH 底部反弹 {healthy_count}/{len(all_dims)}维健康'
         elif has_m1:
             decision = 'watch'
             quality_note = f'WATCH M1康复观察 {healthy_count}/{len(all_dims)}维健康'
@@ -591,11 +781,15 @@ def calculate_score(kline: List[dict], detect_result: dict,
             decision = 'reduce'
             quality_note = f'REDUCE 偏谨慎 {healthy_count}/{len(all_dims)}维健康'
         
-    elif total >= 35:
+    elif total >= t_low:
         # 反弹信号 → WATCH
         if has_rebound:
             decision = 'watch'
             quality_note = f'WATCH 超跌反弹 {healthy_count}/{len(all_dims)}维健康'
+        # V1.3.5-fix: 底部反弹保护同样适用于35-49区间（之前仅<35有效，边界震荡会漏判）
+        elif deep_rebound_watch:
+            decision = 'watch'
+            quality_note = f'WATCH 底部反弹 {healthy_count}/{len(all_dims)}维健康'
         # 均线多头结构 → 涨多回调，不卖出
         elif ma_bullish:
             decision = 'reduce'
@@ -627,19 +821,74 @@ def calculate_score(kline: List[dict], detect_result: dict,
         decision = 'hold_buy'
         quality_note += ' → 加仓升级HOLD'
     
+    # === V1.3.5: 决策滞回(Hysteresis) —— 防止边界震荡 ===
+    hysteresis_applied = False
+    hysteresis_zone = 5  # 边界缓冲区宽度
+    
+    if prev_decision and prev_decision not in ('', 'unknown'):
+        # 当分数在边界附近时，维持前日决策
+        # 需要连续2日突破阈值才改变方向
+        def _decision_rank(d):
+            return {'hold': 0, 'hold_buy': 0, 'watch': 1, 'reduce': 2, 'sell': 3}.get(d, 99)
+        
+        curr_rank = _decision_rank(decision)
+        prev_rank = _decision_rank(prev_decision)
+        
+        # 同级别决策区间映射（用于判断是否在滞回区内）
+        # 每个决策对应的阈值区间
+        if decision != prev_decision:
+            boundary_check = False
+            
+            # 检查是否在滞回边界
+            if prev_decision == 'reduce' and decision in ('watch', 'hold'):
+                # 从reduce上调到watch/hold，检查分数是否在t_mid+hysteresis_zone范围内
+                if total < t_mid + hysteresis_zone:
+                    boundary_check = True
+            elif prev_decision == 'watch' and decision in ('sell', 'reduce'):
+                # 从watch下调到sell/reduce
+                if total > t_low - hysteresis_zone:
+                    boundary_check = True
+            elif prev_decision == 'sell' and decision == 'watch':
+                # 从sell上调到watch（反弹）
+                if total < t_low + hysteresis_zone:
+                    boundary_check = True
+            elif prev_decision == 'hold' and decision in ('reduce', 'watch'):
+                if total > t_upper - hysteresis_zone:
+                    boundary_check = True
+            elif prev_decision == 'reduce' and decision == 'sell':
+                if total > t_low - hysteresis_zone:
+                    boundary_check = True
+            
+            if boundary_check:
+                decision = prev_decision
+                hysteresis_applied = True
+                quality_note += f' [滞回: 维持{prev_decision.upper()}，{total}分在边界±{hysteresis_zone}内]'
+    
+    # === V1.3.5: 减仓比例建议 ===
+    sector_downgraded = False  # 板块共振标记（由外部设置）
+    position_size = compute_position_size(
+        decision, total, base_total,
+        cost_dim, sector_downgraded, ma_healthy_pullback
+    )
+    
     return {
         'total': total,
         'base_total': base_total,
-        'max_total': 100,
+        'max_total': 108,
         'decision': decision,
         'dimensions': dims,
         'vp_dim': vp_dim,
         'cost_dim': cost_dim,
+        'fund_flow_dim': fund_flow_dim,
         'vp_reason': vp_reason,
         'buy_advice': buy_dim.get('buy_advice'),
         'buy_grade': buy_dim.get('buy_grade', 0),
         'quality_note': quality_note,
         'healthy_count': healthy_count,
+        'position_size': position_size,
+        'hysteresis_applied': hysteresis_applied,
+        'regime_note': regime_note,
+        'market_regime': market_regime,
     }
 
 
@@ -782,6 +1031,14 @@ def format_score_output(score_result: dict, detect_result: dict,
         for d in cost_dim.get('details', []):
             lines.append(f"  {d}")
     
+    # 资金流向维度
+    fund_flow_dim = score_result.get('fund_flow_dim')
+    if fund_flow_dim and fund_flow_dim.get('active'):
+        bar = _bar(max(0, fund_flow_dim['score'] + 8), 16)  # 偏移展示
+        lines.append(f"{fund_flow_dim['label']:<8} {bar} {fund_flow_dim['score']:+.0f}/{fund_flow_dim['max']}")
+        for d in fund_flow_dim.get('details', []):
+            lines.append(f"  {d}")
+    
     lines.append("")
     
     # 反弹博弈信号 🎲
@@ -802,6 +1059,20 @@ def format_score_output(score_result: dict, detect_result: dict,
     quality_note = score_result.get('quality_note', '')
     lines.append(f"Advice: {quality_note}")
     
+    # 减仓比例建议
+    position_size = score_result.get('position_size')
+    if position_size and position_size.get('action') in ('reduce', 'sell'):
+        lines.append(f"Position: {position_size['label']} ({position_size['reason']})")
+    
+    # 滞回标记
+    if score_result.get('hysteresis_applied'):
+        lines.append(f"Hysteresis: 边界震荡保护已激活，维持前日决策")
+    
+    # 市场环境
+    regime_note = score_result.get('regime_note')
+    if regime_note:
+        lines.append(f"Regime: {regime_note}")
+    
     lines.append("")
     
     return '\n'.join(lines)
@@ -820,4 +1091,13 @@ def format_score_compact(score_result: dict, detect_result: dict,
         if warn_names:
             warn_str = f"  ⚠{'|'.join(warn_names)}"
     
-    return f"  {icon} {name}({code})  {score_result['decision']}  {score_result['total']}分  {primary.get('name', '无形态')}{warn_str}"
+    # 减仓比例
+    pos_str = ''
+    pos = score_result.get('position_size')
+    if pos and pos.get('action') in ('reduce', 'sell'):
+        pos_str = f"  [{pos['label']}]"
+    
+    # 滞回标记
+    hyst_str = ' [滞回]' if score_result.get('hysteresis_applied') else ''
+    
+    return f"  {icon} {name}({code})  {score_result['decision']}  {score_result['total']}分  {primary.get('name', '无形态')}{pos_str}{warn_str}{hyst_str}"

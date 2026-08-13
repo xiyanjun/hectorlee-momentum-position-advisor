@@ -307,10 +307,10 @@ def detect_m5_flag_consolidation(kline: List[dict], params: dict = None) -> dict
     vols = [k['volume'] for k in kline]
     n = len(kline)
     
-    # 找此前拉升段（旗杆）：寻找一段明显上涨
+    # 找此前拉升段（旗杆）：扩展搜索范围至n-25
     rally_gain = 0
     rally_start = n - 1
-    for i in range(n-15, n-5):
+    for i in range(n-20, max(1, n-25), -1):
         if i < 5:
             continue
         gain = (closes[i] - closes[i-5]) / closes[i-5] * 100
@@ -318,6 +318,17 @@ def detect_m5_flag_consolidation(kline: List[dict], params: dict = None) -> dict
             rally_gain = gain
             rally_start = i
             break
+    
+    if rally_gain == 0:
+        # 放宽：也检查单日大涨>5%
+        for i in range(n-20, max(1, n-25), -1):
+            chg = (closes[i] - closes[i-1]) / closes[i-1] * 100 if i > 0 else 0
+            if chg > 5:
+                # 用当日及前后2日构建旗杆区间
+                rally_gain = (closes[min(i+2, n-1)] - closes[max(0, i-3)]) / closes[max(0, i-3)] * 100
+                if rally_gain > 8:
+                    rally_start = i - 2
+                    break
     
     if rally_gain == 0:
         return {'hit': False, 'name': 'M5上升旗形整理', 'tag': '🏴', 'type': 'hold'}
@@ -329,14 +340,23 @@ def detect_m5_flag_consolidation(kline: List[dict], params: dict = None) -> dict
     if len(consol_highs) < 5:
         return {'hit': False, 'name': 'M5上升旗形整理', 'tag': '🏴', 'type': 'hold'}
     
-    # 高点和低点均逐日下移（取每2日均值检测趋势）
-    half = len(consol_highs) // 2
-    first_half_h = sum(consol_highs[:half]) / half
-    second_half_h = sum(consol_highs[half:]) / len(consol_highs[half:])
-    first_half_l = sum(consol_lows[:half]) / half
-    second_half_l = sum(consol_lows[half:]) / len(consol_lows[half:])
+    # V1.3.5: 用线性回归斜率判断整理期高低点趋势（替代前后半均值比较）
+    def _slope(arr):
+        """计算线性回归斜率"""
+        n_pts = len(arr)
+        if n_pts < 3:
+            return 0
+        x_mean = (n_pts - 1) / 2
+        y_mean = sum(arr) / n_pts
+        num = sum((i - x_mean) * (arr[i] - y_mean) for i in range(n_pts))
+        den = sum((i - x_mean) ** 2 for i in range(n_pts))
+        return num / den if den != 0 else 0
     
-    if not (second_half_h < first_half_h and second_half_l < first_half_l):
+    high_slope = _slope(consol_highs)
+    low_slope = _slope(consol_lows)
+    
+    # 旗形整理：高点和低点均向下倾斜（斜率<0 或 接近0的横盘）
+    if not (high_slope < consol_highs[0] * 0.003 and low_slope < consol_highs[0] * 0.003):
         return {'hit': False, 'name': 'M5上升旗形整理', 'tag': '🏴', 'type': 'hold'}
     
     # 缩量
@@ -411,7 +431,7 @@ def detect_m6_staircase_consolidation(kline: List[dict], params: dict = None) ->
     range_mid = (consol_high + consol_low) / 2
     upper_count = sum(1 for k in consol_kline if k['close'] > range_mid)
     if upper_count / len(consol_kline) < 0.6:
-        return {'hit': False, 'name': 'M6阶梯横盘蓄力', 'tag': '🪜', 'type': 'hold'}
+        return {'hit': False, 'name': 'M6阶梯横盘蓄力', 'tag': '🪜', 'type': 'hold'    }
     
     bonus = 2 if all(
         consol_kline[i]['low'] >= consol_kline[i-1]['low']
@@ -422,6 +442,181 @@ def detect_m6_staircase_consolidation(kline: List[dict], params: dict = None) ->
         'hit': True, 'name': 'M6阶梯横盘蓄力', 'tag': '🪜', 'type': 'hold',
         'score_base': 8 + bonus,
         'detail': f'放量日后横盘{len(consol_kline)}日，振幅{amplitude:.1f}%，缩量蓄力'
+    }
+
+
+# ═══════════════════════════════════════════
+#  M12 V形反转 ⚡ (V1.3.5 新增)
+# ═══════════════════════════════════════════
+
+def detect_m12_v_reversal(kline: List[dict], params: dict = None) -> dict:
+    """
+    V形反转：急跌后快速反弹，收复大部分失地。
+    
+    触发条件：
+    1. 近15日最大回撤 > 15%（急跌段）
+    2. 回撤低点后3日内反弹，收复跌幅 > 50%
+    3. 反弹段放量（近3日均量 > 前10日均量）
+    4. 当前收盘 > MA20（趋势确认）
+    
+    强度：★★★☆（强反转信号）
+    """
+    if len(kline) < 25:
+        return {'hit': False, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold'}
+    
+    closes = [k['close'] for k in kline]
+    highs = [k['high'] for k in kline]
+    lows = [k['low'] for k in kline]
+    vols = [k['volume'] for k in kline]
+    opens = [k['open'] for k in kline]
+    n = len(kline)
+    
+    # 找近15日最高点和其后最低点
+    window = 15
+    peak_val = max(highs[-window:])
+    peak_idx = n - window + highs[-window:].index(peak_val)
+    
+    # 找峰值后的最低点
+    trough_val = min(lows[peak_idx:])
+    trough_idx = peak_idx + lows[peak_idx:].index(trough_val)
+    
+    # 条件1：回撤 > 15%
+    drawdown = (trough_val - peak_val) / peak_val * 100
+    if drawdown > -15:
+        return {'hit': False, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold'}
+    
+    # 条件2：低点后3日内反弹收复 > 50%跌幅
+    if trough_idx >= n - 3:
+        return {'hit': False, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold'}
+    
+    recovery = (closes[-1] - trough_val) / (peak_val - trough_val) * 100
+    if recovery < 50:
+        return {'hit': False, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold'}
+    
+    # 条件3：反弹放量
+    vol_recent_3 = sum(vols[trough_idx+1:]) / max(1, n - trough_idx - 1)
+    vol_prev_10 = sum(vols[max(0, trough_idx-10):trough_idx+1]) / min(10, trough_idx+1)
+    if vol_recent_3 < vol_prev_10:
+        return {'hit': False, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold'}
+    
+    # 条件4：站上MA20
+    ma20 = sma(closes, 20)
+    if closes[-1] <= ma20[-1]:
+        return {'hit': False, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold'}
+    
+    # 当日收阳加分
+    bonus = 2 if closes[-1] > opens[-1] else 0
+    
+    return {
+        'hit': True, 'name': 'M12 V形反转', 'tag': '⚡', 'type': 'hold',
+        'score_base': 11 + bonus,
+        'detail': f'回撤{abs(drawdown):.1f}%后收复{recovery:.0f}%，反弹放量{vol_recent_3/vol_prev_10:.1f}x'
+    }
+
+
+# ═══════════════════════════════════════════
+#  M13 双底/W底 🔄 (V1.3.5 新增)
+# ═══════════════════════════════════════════
+
+def detect_m13_double_bottom(kline: List[dict], params: dict = None) -> dict:
+    """
+    双底/W底：两次探底不破前低，第二次缩量，放量突破颈线确认。
+    
+    触发条件：
+    1. 近30日有两个低点，间距 ≥ 5日
+    2. 两低点价格差异 < 3%（不破前低）
+    3. 第二次探底缩量（量 < 第一次探底量的70%）
+    4. 当前收盘 > 两低点之间的颈线（反弹高点）
+    5. 突破日放量
+    
+    强度：★★★★（确认度高的反转信号）
+    """
+    if len(kline) < 35:
+        return {'hit': False, 'name': 'M13 双底反转', 'tag': '🔄', 'type': 'hold'}
+    
+    closes = [k['close'] for k in kline]
+    highs = [k['high'] for k in kline]
+    lows = [k['low'] for k in kline]
+    vols = [k['volume'] for k in kline]
+    opens = [k['open'] for k in kline]
+    n = len(kline)
+    
+    # 找近30日的两个显著低点
+    window = 30
+    search_lows = lows[-window:]
+    
+    # 用谷底检测：找局部极小值（比左右2日都低）
+    troughs = []
+    for i in range(2, window - 2):
+        idx = n - window + i
+        if lows[idx] <= min(lows[idx-2], lows[idx-1], lows[idx+1], lows[idx+2]):
+            troughs.append({
+                'idx': idx,
+                'low': lows[idx],
+                'vol': vols[idx],
+                'close': closes[idx],
+            })
+    
+    if len(troughs) < 2:
+        return {'hit': False, 'name': 'M13 双底反转', 'tag': '🔄', 'type': 'hold'}
+    
+    # 找最近两个低点，间距 ≥ 5日
+    troughs.sort(key=lambda t: t['idx'], reverse=True)
+    
+    best_pair = None
+    for i in range(len(troughs)):
+        for j in range(i+1, len(troughs)):
+            t1, t2 = troughs[i], troughs[j]  # t1更近
+            if t2['idx'] >= t1['idx'] - 4:
+                continue  # 太近，不算双底
+            if t1['idx'] - t2['idx'] > 25:
+                continue  # 太远
+            
+            # 条件2：两低点差异 < 3%
+            diff = abs(t1['low'] - t2['low']) / max(t1['low'], t2['low']) * 100
+            if diff > 3:
+                continue
+            
+            # 条件3：第二次探底缩量
+            if t1['vol'] > t2['vol'] * 0.7:
+                continue
+            
+            best_pair = (t2, t1)  # (较早, 较近)
+            break
+        if best_pair:
+            break
+    
+    if not best_pair:
+        return {'hit': False, 'name': 'M13 双底反转', 'tag': '🔄', 'type': 'hold'}
+    
+    t_first, t_second = best_pair
+    
+    # 颈线 = 两次低点之间的反弹高点
+    neckline = max(highs[t_first['idx']:t_second['idx']+1]) if t_first['idx'] < t_second['idx'] else closes[-1]
+    
+    # 条件4：当前收盘 > 颈线
+    if closes[-1] <= neckline:
+        return {'hit': False, 'name': 'M13 双底反转', 'tag': '🔄', 'type': 'hold'}
+    
+    # 条件5：突破放量
+    avg_vol_10 = sum(vols[-15:-5]) / 10 if n >= 15 else vols[-1]
+    if vols[-1] < avg_vol_10 * 1.2:
+        return {'hit': False, 'name': 'M13 双底反转', 'tag': '🔄', 'type': 'hold'}
+    
+    # 突破幅度
+    breakout_pct = (closes[-1] - neckline) / neckline * 100
+    
+    bonus = 0
+    if breakout_pct > 3:
+        bonus += 2
+    if closes[-1] > opens[-1]:
+        bonus += 1
+    
+    return {
+        'hit': True, 'name': 'M13 双底反转', 'tag': '🔄', 'type': 'hold',
+        'score_base': 12 + bonus,
+        'detail': (f'双底{t_first["low"]:.2f}→{t_second["low"]:.2f}不破前低'
+                   f'+颈线{neckline:.2f}突破{breakout_pct:+.1f}%')
     }
 
 
@@ -585,19 +780,22 @@ def detect_b4_exhaustion_reversal(kline: List[dict], params: dict = None) -> dic
     vols = [k['volume'] for k in kline]
     n = len(kline)
     
-    # 检查前面是否有≥3日连续缩量阴线
-    streak = 0
-    for i in range(n-2, max(0, n-8), -1):
+    # V1.3.5: 检查前面是否有≥3日连续阴线（不要求每日严格缩量递减）
+    # 改为：连续≥3日阴线 + 最后3日平均量 < 前5日均量80%
+    bear_streak = 0
+    for i in range(n-2, max(0, n-10), -1):
         body = closes[i] - opens[i]
         if body >= 0:
             break
-        # 缩量检查
-        if i > 0 and vols[i] < vols[i-1]:
-            streak += 1
-        elif streak >= 3:
-            break
+        bear_streak += 1
     
-    if streak < 3:
+    if bear_streak < 3:
+        return {'hit': False, 'name': 'B4缩尽首阳', 'tag': '🌅', 'type': 'buy'}
+    
+    # 缩量检查：最后3日（含缩量阴线区间）平均量 < 前5日均量 * 0.8
+    vol_last_3 = sum(vols[max(0,n-4):n-1]) / min(3, n-1 - max(0, n-4))
+    vol_prev_5 = sum(vols[max(0,n-9):max(0,n-4)]) / min(5, n-4 - max(0, n-9))
+    if vol_last_3 > vol_prev_5 * 0.8:
         return {'hit': False, 'name': 'B4缩尽首阳', 'tag': '🌅', 'type': 'buy'}
     
     # 当日放量阳线
@@ -1211,6 +1409,8 @@ def detect_all(kline: List[dict], turnover: float = None, params: dict = None, c
         detect_m4_pullback_support,
         detect_m5_flag_consolidation,
         detect_m6_staircase_consolidation,
+        detect_m12_v_reversal,
+        detect_m13_double_bottom,
     ]
     
     sell_detectors = [
@@ -1279,10 +1479,11 @@ def detect_all(kline: List[dict], turnover: float = None, params: dict = None, c
             primary = warnings[0]
             decision = 'reduce'
     elif hold_patterns:
-        # M1 > M2 > M3 > M4 > M5 > M6
+        # M1 > M2 > M3 > M12 > M13 > M4 > M5 > M6
         priority = {
             'M1底部启动加速': 0, 'M2均线多头发散': 1, 'M3趋势中继加速': 2,
-            'M4缩量回踩支撑': 3, 'M5上升旗形整理': 4, 'M6阶梯横盘蓄力': 5
+            'M12 V形反转': 3, 'M13 双底反转': 4,
+            'M4缩量回踩支撑': 5, 'M5上升旗形整理': 6, 'M6阶梯横盘蓄力': 7
         }
         primary = min(hold_patterns, key=lambda h: priority.get(h['name'], 99))
         decision = 'hold'

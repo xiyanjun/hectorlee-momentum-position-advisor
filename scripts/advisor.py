@@ -49,7 +49,7 @@ def _c(text, color):
 
 # ─── 单股诊断 ───
 
-def diagnose_single(code: str, cost: float = None, detail: bool = False):
+def diagnose_single(code: str, cost: float = None, detail: bool = False, prev_decision: str = None):
     """对单只股票执行完整诊断"""
     try:
         from data_provider import get_kline, get_realtime_quote
@@ -78,14 +78,14 @@ def diagnose_single(code: str, cost: float = None, detail: bool = False):
     vp_result = get_vp_result(kline, code)
     
     # 先算基础动量分，获取初步决策
-    base_score = calculate_score(kline, detect_result, cost=cost, latest_price=price)
+    base_score = calculate_score(kline, detect_result, cost=cost, latest_price=price, prev_decision=prev_decision)
     momentum_decision = base_score['decision']
     
     # 计算融合加成
     vp_bonus, vp_reason = compute_fusion_bonus(vp_result, momentum_decision)
     
-    # 最终评分（含量价共振 + 加仓信号 + 成本因子）
-    score_result = calculate_score(kline, detect_result, vp_bonus, vp_reason, vp_result, cost, price)
+    # 最终评分（含量价共振 + 加仓信号 + 成本因子 + 资金流向 + 决策滞回）
+    score_result = calculate_score(kline, detect_result, vp_bonus, vp_reason, vp_result, cost, price, prev_decision=prev_decision)
     
     # 交叉引用 volume-price-screener
     vp_summary = format_vp_summary(vp_result)
@@ -203,17 +203,40 @@ def diagnose_portfolio(detail: bool = False, filepath: str = None):
         print("持仓文件为空，请先在 data/positions.json 中添加持仓")
         return
     
-    print(f"{_c('=== Momentum Position Advisor V1.0 ===', Color.BOLD)}")
+    # === V1.3.5: 加载前次决策用于滞回 ===
+    prev_decisions = {}
+    prev_file = filepath.replace('.json', '_prev_decisions.json') if filepath else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'prev_decisions.json'
+    )
+    try:
+        if os.path.exists(prev_file):
+            with open(prev_file, 'r') as f:
+                prev_decisions = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        pass
+    
+    print(f"{_c('=== Momentum Position Advisor V1.3.5 ===', Color.BOLD)}")
     print()
     
     results = []
+    current_decisions = {}
     for pos in positions:
         code = pos['code']
         cost = pos.get('cost', 0)
-        result = diagnose_single(code, cost, detail)
+        prev_d = prev_decisions.get(code)
+        result = diagnose_single(code, cost, detail, prev_decision=prev_d)
         if result:
             results.append(result)
+            current_decisions[code] = result['score']['decision']
         print()
+    
+    # === V1.3.5: 保存当前决策供下次使用 ===
+    try:
+        os.makedirs(os.path.dirname(prev_file), exist_ok=True)
+        with open(prev_file, 'w') as f:
+            json.dump(current_decisions, f, indent=2)
+    except (OSError, IOError):
+        pass  # 写入失败不影响主流程
     
     # 汇总
     hold = [r for r in results if r['score']['decision'] in ('hold', 'hold_buy')]
