@@ -1087,6 +1087,14 @@ def detect_pre_m11_warning(kline: List[dict], params: dict = None) -> Optional[d
     
     ma20 = sma(closes, 20)
     
+    # V1.3.6: 今日放量阳线反弹豁免 —— 最新日放量阳线(涨≥2%且量≥1.1x)且站上MA20时，
+    # 属于向上收复而非向下逼近MA20，方向相反，不构成"预破位"预警。
+    if n >= 2:
+        _last_chg = (closes[-1] - closes[-2]) / closes[-2] * 100 if closes[-2] > 0 else 0
+        _vol_r = vols[-1] / vols[-2] if vols[-2] > 0 else 1
+        if closes[-1] > opens[-1] and _last_chg >= 2 and _vol_r >= 1.1 and closes[-1] > ma20[-1]:
+            return None
+    
     # 条件1：价格在MA20上方但距离<3%
     dist_to_ma20 = (closes[-1] - ma20[-1]) / ma20[-1] * 100 if ma20[-1] > 0 else 100
     if dist_to_ma20 < 0:
@@ -1432,6 +1440,27 @@ def detect_all(kline: List[dict], turnover: float = None, params: dict = None, c
         warnings.append(pre_m11)
     
     sell_signals = [d(kline, p) for d in sell_detectors if d(kline, p)['hit']]
+    
+    # V1.3.6: 今日放量反弹覆盖 —— 最新日为放量反弹阳线且收复MA20时，
+    # 基于"弱势/回撤/诱多"的卖出信号(M8/M9/M10)被反弹证伪，予以清除。
+    # 趋势破位M11要求连续2日跌破MA20，今日阳线站上时天然不触发，无需处理。
+    # 设计依据：V1.3.4"深度回撤+阳线=止跌信号，不应机械卖出"哲学的上位统一。
+    if sell_signals:
+        _cl = [k['close'] for k in kline]
+        _op = [k['open'] for k in kline]
+        _vo = [k['volume'] for k in kline]
+        _nn = len(kline)
+        _ma20_arr = sma(_cl, 20)
+        _last_chg = (_cl[-1] - _cl[-2]) / _cl[-2] * 100 if _nn >= 2 else 0
+        _vol_ratio = _vo[-1] / _vo[-2] if _nn >= 2 and _vo[-2] > 0 else 1
+        _is_bull = _cl[-1] > _op[-1]
+        _above_ma20 = _cl[-1] > _ma20_arr[-1] if _ma20_arr else False
+        _today_rebound = _is_bull and _last_chg >= 2 and _vol_ratio >= 1.1 and _above_ma20
+        if _today_rebound:
+            _override = {'M8高开诱多', 'M9缩量连阴', 'M10峰值回撤'}
+            _kept = [s for s in sell_signals if s['name'] not in _override]
+            if _kept != sell_signals:
+                sell_signals = _kept
     
     # B1~B4 加仓信号检测（只有非卖出区间才检测）
     buy_signals = []
