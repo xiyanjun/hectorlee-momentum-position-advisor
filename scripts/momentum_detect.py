@@ -1021,7 +1021,17 @@ def detect_m10_peak_drawdown(kline: List[dict], params: dict = None) -> dict:
     if drawdown > -8:
         return {'hit': False, 'name': 'M10峰值回撤', 'tag': '⛔', 'type': 'sell'}
     
-    # 近3日至少2日阴线
+    # V1.3.7: 近3日无反弹阳线 —— 文档语义修正。原"≥2日阴线"无法区分
+    # "昨日大阳反弹+今日缩量回踩"与"阴跌中继"，会误杀见底反弹股。
+    # 若近3日出现涨幅≥2%的阳线，说明已有反弹，不触发M10。
+    for i in range(n-3, n):
+        if i <= 0:
+            continue
+        _day_chg = (closes[i] - closes[i-1]) / closes[i-1] * 100
+        if closes[i] > opens[i] and _day_chg >= 2:
+            return {'hit': False, 'name': 'M10峰值回撤', 'tag': '⛔', 'type': 'sell'}
+    
+    # 近3日至少2日阴线（无反弹阳线的前提下，仍需确认弱势）
     bearish_count = sum(1 for i in range(n-3, n) if closes[i] < opens[i])
     if bearish_count < 2:
         return {'hit': False, 'name': 'M10峰值回撤', 'tag': '⛔', 'type': 'sell'}
