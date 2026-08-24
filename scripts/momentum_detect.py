@@ -695,6 +695,9 @@ def detect_b2_pullback_confirm(kline: List[dict], params: dict = None) -> dict:
         return {'hit': False, 'name': 'B2回踩确认', 'tag': '🎯', 'type': 'buy'}
     
     # 检查近3日是否有回踩动作（最低价接近均线）
+    # V1.3.8 修复：回踩日必须是"回踩"而非"突破"或"破位"——
+    #   ① 收盘价站回均线上方（未破位，排除"盘中触及后收盘跌破"的假回踩）
+    #   ② 低点低于开盘价（有下探动作，排除"低开高走/突破大阳线"被误判为回踩）
     touch_found = False
     touch_ma = ''
     touch_idx = n - 1
@@ -702,12 +705,12 @@ def detect_b2_pullback_confirm(kline: List[dict], params: dict = None) -> dict:
         dist20 = (lows[i] - ma20[i]) / ma20[i] * 100 if ma20[i] > 0 else 100
         dist60 = (lows[i] - ma60[i]) / ma60[i] * 100 if ma60[i] > 0 else 100
         
-        if -2 < dist20 < 1:
+        if -2 < dist20 < 1 and closes[i] >= ma20[i] and lows[i] < opens[i]:
             touch_found = True
             touch_ma = 'MA20'
             touch_idx = i
             break
-        if -2 < dist60 < 1:
+        if -2 < dist60 < 1 and closes[i] >= ma60[i] and lows[i] < opens[i]:
             touch_found = True
             touch_ma = 'MA60'
             touch_idx = i
@@ -716,7 +719,7 @@ def detect_b2_pullback_confirm(kline: List[dict], params: dict = None) -> dict:
     if not touch_found:
         return {'hit': False, 'name': 'B2回踩确认', 'tag': '🎯', 'type': 'buy'}
     
-    # 回踩日缩量
+    # 回踩日缩量（V1.3.8：记录回踩日量比，供 detail 参考；不强制缩量——放量回踩确认同样健康）
     touch_vol = vols[touch_idx]
     touch_vol_ratio = vols[touch_idx] / avg_vol_5 if avg_vol_5 > 0 else 1
     
