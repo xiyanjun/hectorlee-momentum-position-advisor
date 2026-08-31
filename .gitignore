@@ -20,3 +20,9 @@ Thumbs.db
 # Temp
 *.tmp
 *.swp
+
+# Local metadata (auto-generated on install)
+_user_meta.json
+
+# Real position data (use positions.example.json as template)
+!data/positions.example.json
