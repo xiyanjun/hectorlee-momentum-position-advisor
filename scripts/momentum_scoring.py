@@ -614,7 +614,10 @@ def calculate_score(kline: List[dict], detect_result: dict,
                     params: dict = None,
                     prev_decision: str = None,
                     fund_flow: dict = None,
-                    market_regime: str = None) -> dict:
+                    market_regime: str = None,
+                    code: str = '',
+                    fundamental: dict = None,
+                    events: list = None) -> dict:
     """
     计算完整的多维评分 + 量价共振加成 + 持仓成本因子 + 资金流向 + 决策滞回
     
@@ -864,6 +867,20 @@ def calculate_score(kline: List[dict], detect_result: dict,
                 hysteresis_applied = True
                 quality_note += f' [滞回: 维持{prev_decision.upper()}，{total}分在边界±{hysteresis_zone}内]'
     
+    # === V1.4.0: 逻辑覆盖层 —— 四层判断框架最终裁决 ===
+    # 纯量价决策之后，叠加：逻辑证伪/量价破坏分级/资金承接/事件日历
+    overlay_notes = []
+    if fundamental is not None or events:
+        try:
+            from logic_overlay import apply_logic_overlay
+            decision, quality_note, overlay_notes = apply_logic_overlay(
+                decision, quality_note, code=code,
+                kline=kline, detect_result=detect_result,
+                fundamental=fundamental or {}, events=events or [])
+        except Exception as e:
+            import sys as _sys
+            print(f'[logic_overlay] 覆盖层执行失败，退回纯量价决策: {e}', file=_sys.stderr)
+
     # === V1.3.5: 减仓比例建议 ===
     sector_downgraded = False  # 板块共振标记（由外部设置）
     position_size = compute_position_size(
@@ -889,6 +906,7 @@ def calculate_score(kline: List[dict], detect_result: dict,
         'hysteresis_applied': hysteresis_applied,
         'regime_note': regime_note,
         'market_regime': market_regime,
+        'overlay_notes': overlay_notes,
     }
 
 

@@ -26,3 +26,7 @@ _user_meta.json
 
 # Real position data (use positions.example.json as template)
 !data/positions.example.json
+
+# V1.4.0 model configs (tracked by default)
+!data/fundamentals.json
+!data/events.json

@@ -817,7 +817,7 @@ def detect_b4_exhaustion_reversal(kline: List[dict], params: dict = None) -> dic
     return {
         'hit': True, 'name': 'B4缩尽首阳', 'tag': '🌅', 'type': 'buy',
         'anchor_date': kline[-1]['date'],
-        'detail': f'连续{streak}日缩量阴线后放量首阳，涨幅{day_chg:.1f}%，量比{vols[-1]/avg_vol_5:.1f}x'
+        'detail': f'连续{bear_streak}日缩量阴线后放量首阳，涨幅{day_chg:.1f}%，量比{vols[-1]/avg_vol_5:.1f}x'
     }
 
 

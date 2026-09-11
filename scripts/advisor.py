@@ -33,6 +33,11 @@ from cross_ref import get_vp_result, compute_fusion_bonus, format_vp_summary
 from risk_filter import run_risk_checks
 from portfolio import get_positions, calc_pnl
 from sector_resonance import detect_sector_resonance, format_resonance_report
+from logic_overlay import load_fundamentals, load_events, format_overlay_summary
+
+# V1.4.0: 全局加载逻辑覆盖层配置（启动时一次）
+FUNDAMENTALS = load_fundamentals()
+EVENTS = load_events()
 
 # ─── 颜色支持 ───
 
@@ -84,8 +89,10 @@ def diagnose_single(code: str, cost: float = None, detail: bool = False, prev_de
     # 计算融合加成
     vp_bonus, vp_reason = compute_fusion_bonus(vp_result, momentum_decision)
     
-    # 最终评分（含量价共振 + 加仓信号 + 成本因子 + 资金流向 + 决策滞回）
-    score_result = calculate_score(kline, detect_result, vp_bonus, vp_reason, vp_result, cost, price, prev_decision=prev_decision)
+    # 最终评分（含量价共振 + 加仓信号 + 成本因子 + 资金流向 + 决策滞回 + V1.4.0逻辑覆盖层）
+    fund_cfg = FUNDAMENTALS.get(code)
+    score_result = calculate_score(kline, detect_result, vp_bonus, vp_reason, vp_result, cost, price, prev_decision=prev_decision,
+                                   code=code, fundamental=fund_cfg, events=EVENTS)
     
     # 交叉引用 volume-price-screener
     vp_summary = format_vp_summary(vp_result)
@@ -112,6 +119,10 @@ def diagnose_single(code: str, cost: float = None, detail: bool = False, prev_de
         if buy:
             stars = '⭐' * score_result.get('buy_grade', 0)
             line += f"  {stars}{buy}"
+        # V1.4.0: 逻辑覆盖层标注
+        ov = score_result.get('overlay_notes') or []
+        if ov:
+            line += _c(format_overlay_summary(ov), Color.CYAN)
         print(line)
     
     # 风险警告
