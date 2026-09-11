@@ -30,3 +30,7 @@ _user_meta.json
 # V1.4.0 model configs (tracked by default)
 !data/fundamentals.json
 !data/events.json
+
+# V1.4.0 model configs (tracked by default)
+!data/fundamentals.json
+!data/events.json
